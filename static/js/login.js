@@ -77,7 +77,7 @@ async function signInGoogle(idToken) {
 // Fallback Firebase configuration
 const FALLBACK_FIREBASE_CONFIG = {
   apiKey: 'AIzaSyBlhlDv10wzSoOPC5f2PCRs-C8SzQuqWDk',
-  authDomain: 'projecttracker-17e6d.firebaseapp.com',
+  authDomain: 'tracker.holbox.ai',
   projectId: 'projecttracker-17e6d',
   storageBucket: 'projecttracker-17e6d.firebasestorage.app',
   messagingSenderId: '615565232205',

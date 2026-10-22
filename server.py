@@ -63,7 +63,7 @@ load_dotenv()
 
 FIREBASE_CONFIG = {
     "apiKey": os.environ.get("FIREBASE_API_KEY", "AIzaSyBlhlDv10wzSoOPC5f2PCRs-C8SzQuqWDk"),
-    "authDomain": os.environ.get("FIREBASE_AUTH_DOMAIN", "projecttracker-17e6d.firebaseapp.com"),
+    "authDomain": os.environ.get("FIREBASE_AUTH_DOMAIN", "tracker.holbox.ai"),
     "projectId": os.environ.get("FIREBASE_PROJECT_ID", auth.FIREBASE_PROJECT_ID),
     "storageBucket": os.environ.get("FIREBASE_STORAGE_BUCKET", "projecttracker-17e6d.firebasestorage.app"),
     "messagingSenderId": os.environ.get("FIREBASE_MESSAGING_SENDER_ID", "615565232205"),

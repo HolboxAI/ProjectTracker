@@ -10,16 +10,16 @@ ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 # Load .env if present
 if [ -f "$ROOT_DIR/.env" ]; then
-  set -a
-  # Parse key=value lines ignoring comments and blank lines
-  while IFS='=' read -r key val || [ -n "$key" ]; do
-    key=$(echo "$key" | tr -d '[:space:]')
-    [[ "$key" =~ ^#.* ]] && continue
-    [ -z "$key" ] && continue
-    val=$(echo "$val" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' -e 's/^"//' -e 's/"$//' -e "s/^'//" -e "s/'$//")
-    export "$key"="$val"
-  done < <(grep -v '^[[:space:]]*#' "$ROOT_DIR/.env" | grep '=')
-  set +a
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in
+      \#*|"") continue ;;
+      *=*)
+        key=$(echo "${line%%=*}" | tr -d '[:space:]')
+        val=$(echo "${line#*=}" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' -e 's/^"//' -e 's/"$//' -e "s/^'//" -e "s/'$//")
+        [ -n "$key" ] && export "$key"="$val"
+        ;;
+    esac
+  done < "$ROOT_DIR/.env"
 fi
 
 if [ -z "${EC2_HOST:-}" ]; then
