@@ -38,6 +38,39 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 STATIC_DIR = os.path.join(BASE_DIR, "static")
 DEFAULT_DB = os.path.join(BASE_DIR, "tracker.sqlite3")
 
+
+def load_dotenv(path=None):
+    """Load key-value pairs from .env into os.environ if not already present."""
+    env_file = path or os.path.join(BASE_DIR, ".env")
+    if not os.path.isfile(env_file):
+        return
+    try:
+        with open(env_file, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                k, _, v = line.partition("=")
+                k = k.strip()
+                v = v.strip().strip("'\"")
+                if k and k not in os.environ:
+                    os.environ[k] = v
+    except Exception:
+        pass
+
+
+load_dotenv()
+
+FIREBASE_CONFIG = {
+    "apiKey": os.environ.get("FIREBASE_API_KEY", "AIzaSyBlhlDv10wzSoOPC5f2PCRs-C8SzQuqWDk"),
+    "authDomain": os.environ.get("FIREBASE_AUTH_DOMAIN", "projecttracker-17e6d.firebaseapp.com"),
+    "projectId": os.environ.get("FIREBASE_PROJECT_ID", auth.FIREBASE_PROJECT_ID),
+    "storageBucket": os.environ.get("FIREBASE_STORAGE_BUCKET", "projecttracker-17e6d.firebasestorage.app"),
+    "messagingSenderId": os.environ.get("FIREBASE_MESSAGING_SENDER_ID", "615565232205"),
+    "appId": os.environ.get("FIREBASE_APP_ID", "1:615565232205:web:0ae8e33669a5761dfe7404"),
+    "measurementId": os.environ.get("FIREBASE_MEASUREMENT_ID", "G-LRQM9LRXHH"),
+}
+
 CONTENT_TYPES = {
     ".html": "text/html; charset=utf-8",
     ".css": "text/css; charset=utf-8",
@@ -248,6 +281,26 @@ class Handler(BaseHTTPRequestHandler):
         """The four session endpoints. They live here because they are the
         only routes that touch a cookie."""
         body = body or {}
+
+        if method == "GET" and path == "/api/auth/config":
+            return 200, {
+                "firebase": FIREBASE_CONFIG,
+                "allowed_domains": list(auth.ALLOWED_GOOGLE_DOMAINS),
+            }
+
+        if method == "POST" and path == "/api/auth/google":
+            id_token = str(body.get("id_token") or "").strip()
+            if not id_token:
+                raise api.ApiError(400, "Google ID token is required")
+            account = auth.authenticate_google(conn, id_token, ip=self._client_ip())
+            new_token = auth.start_session(
+                conn, account["id"], user_agent=self.headers.get("User-Agent", ""),
+                ip=self._client_ip(),
+            )
+            payload = auth.serialize_user(account)
+            return 200, {"user": payload, "me": payload["name"]}, [
+                ("Set-Cookie", self._session_cookie(new_token, COOKIE_MAX_AGE)),
+            ]
 
         if method == "POST" and path == "/api/auth/login":
             username = str(body.get("username") or "").strip()

@@ -359,6 +359,102 @@ def main():
     check("bootstrap says nobody is signed in without a user",
           call(db_path, "GET", "/api/bootstrap")[1]["user"] is None)
 
+    # --- Firebase Google SSO ---------------------------------------------
+    # Domain allowlist
+    auth.check_google_domain("alice@holbox.ai", ("holbox.ai", "holbox.com"))
+    auth.check_google_domain("bob@holbox.com", ("holbox.ai", "holbox.com"))
+    domain_rejected = False
+    try:
+        auth.check_google_domain("charlie@gmail.com", ("holbox.ai", "holbox.com"))
+    except auth.AuthError as exc:
+        domain_rejected = exc.status == 403
+    check("an untrusted Google domain is rejected with 403", domain_rejected)
+
+    # Empty DB: First Google user becomes admin
+    sso_db_path = os.path.join(tmpdir, "sso_empty.sqlite3")
+    db.init_db(sso_db_path)
+    sso_conn = db.connect(sso_db_path)
+    try:
+        def mock_first_user(tok, proj):
+            return {
+                "sub": "google-sub-first",
+                "email": "krish@holbox.ai",
+                "email_verified": True,
+                "name": "Krish Sharma",
+            }
+
+        first_user = auth.authenticate_google(
+            sso_conn, "mock-token", project_id="test-proj",
+            allowed_domains=("holbox.ai", "holbox.com"), _verifier=mock_first_user,
+        )
+        check("first user on empty DB is promoted to admin",
+              bool(first_user["is_admin"]) is True and first_user["email"] == "krish@holbox.ai",
+              first_user)
+        check("first user provider is google", first_user["provider"] == "google")
+
+        # Second Google user is standard member (not admin)
+        def mock_second_user(tok, proj):
+            return {
+                "sub": "google-sub-second",
+                "email": "dev@holbox.com",
+                "email_verified": True,
+                "name": "Dev Person",
+            }
+
+        second_user = auth.authenticate_google(
+            sso_conn, "mock-token", project_id="test-proj",
+            allowed_domains=("holbox.ai", "holbox.com"), _verifier=mock_second_user,
+        )
+        check("subsequent Google user is not an admin",
+              bool(second_user["is_admin"]) is False and second_user["email"] == "dev@holbox.com")
+        check("second user gets unique username",
+              second_user["username"] != first_user["username"])
+
+        # Signing in again with the same google_sub returns the same user
+        same_user = auth.authenticate_google(
+            sso_conn, "mock-token", project_id="test-proj",
+            allowed_domains=("holbox.ai", "holbox.com"), _verifier=mock_second_user,
+        )
+        check("repeat Google sign-in resolves to the same account",
+              same_user["id"] == second_user["id"])
+
+        # Linking an existing account created by username
+        auth.create_user(sso_conn, "Local User", "localdev", "strong-password-1",
+                         email="localdev@holbox.ai", rounds=FAST)
+        sso_conn.commit()
+
+        def mock_localdev(tok, proj):
+            return {
+                "sub": "google-sub-localdev",
+                "email": "localdev@holbox.ai",
+                "email_verified": True,
+                "name": "Local User",
+            }
+
+        linked = auth.authenticate_google(
+            sso_conn, "mock-token", project_id="test-proj",
+            allowed_domains=("holbox.ai", "holbox.com"), _verifier=mock_localdev,
+        )
+        check("existing account links by email",
+              linked["username"] == "localdev" and linked["google_sub"] == "google-sub-localdev")
+        check("linked user can still sign in with local password",
+              auth.authenticate(sso_conn, "localdev", "strong-password-1") is not None)
+
+        # Deactivated user cannot sign in with Google
+        auth.set_active(sso_conn, second_user["id"], False)
+        sso_conn.commit()
+        deactivated_blocked = False
+        try:
+            auth.authenticate_google(
+                sso_conn, "mock-token", project_id="test-proj",
+                allowed_domains=("holbox.ai", "holbox.com"), _verifier=mock_second_user,
+            )
+        except auth.AuthError as exc:
+            deactivated_blocked = exc.status == 403
+        check("a deactivated Google account is rejected with 403", deactivated_blocked)
+    finally:
+        sso_conn.close()
+
     print("\n%d passed, %d failed" % (len(PASSED), len(FAILED)))
     if FAILED:
         print("\nFailures:")

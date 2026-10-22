@@ -30,9 +30,14 @@ from __future__ import annotations
 import base64
 import hashlib
 import hmac
+import json
+import os
 import re
 import secrets
 import sqlite3
+import urllib.error
+import urllib.parse
+import urllib.request
 from datetime import datetime, timedelta, timezone
 
 COOKIE_NAME = "covex_session"
@@ -44,9 +49,19 @@ MIN_PASSWORD_LENGTH = 10
 MAX_FAILED_ATTEMPTS = 8
 LOCKOUT_MINUTES = 15
 
-# Accounts are local by default; `google` is reserved for the SSO step.
+# Accounts are local by default; `google` is for Firebase Google SSO.
 PROVIDERS = ("local", "google")
 DEFAULT_EMAIL_DOMAIN = "holbox.com"
+
+FIREBASE_PROJECT_ID = os.environ.get("FIREBASE_PROJECT_ID", "projecttracker-17e6d")
+FIREBASE_API_KEY = os.environ.get(
+    "FIREBASE_API_KEY", "AIzaSyBlhlDv10wzSoOPC5f2PCRs-C8SzQuqWDk"
+)
+ALLOWED_GOOGLE_DOMAINS = tuple(
+    d.strip().lower()
+    for d in os.environ.get("ALLOWED_GOOGLE_DOMAINS", "holbox.ai,holbox.com").split(",")
+    if d.strip()
+)
 
 USERNAME_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{1,31}$")
 
@@ -517,7 +532,7 @@ def authenticate(conn, username, password, ip=""):
         )
 
     user = get_user(conn, username)
-    if user is None or user["provider"] != "local" or not user["password_hash"]:
+    if user is None or not user["password_hash"]:
         # Pay the hashing cost anyway, then fail.
         verify_password(_DUMMY_HASH, password or "")
         record_failure(conn, username, ip)
@@ -534,6 +549,222 @@ def authenticate(conn, username, password, ip=""):
         raise AuthError(403, "That account has been deactivated")
 
     clear_failures(conn, username)
+    set_last_login(conn, user["id"])
+    conn.commit()
+    return conn.execute("SELECT * FROM users WHERE id = ?", (user["id"],)).fetchone()
+
+
+# --------------------------------------------------------------------------
+# Firebase Google SSO
+# --------------------------------------------------------------------------
+
+def decode_jwt_unverified(token: str) -> dict:
+    parts = token.split(".")
+    if len(parts) != 3:
+        raise AuthError(400, "Malformed ID token")
+    payload_b64 = parts[1]
+    rem = len(payload_b64) % 4
+    if rem > 0:
+        payload_b64 += "=" * (4 - rem)
+    try:
+        decoded_bytes = base64.urlsafe_b64decode(payload_b64)
+        return json.loads(decoded_bytes.decode("utf-8"))
+    except Exception:
+        raise AuthError(400, "Could not decode ID token payload")
+
+
+def verify_firebase_id_token(id_token: str, expected_project_id: str = None,
+                            api_key: str = None) -> dict:
+    """Verify a Firebase ID token using Identity Toolkit and local claims validation.
+
+    Uses standard library urllib only -- no external dependencies.
+    """
+    project_id = expected_project_id or FIREBASE_PROJECT_ID
+    key = api_key or FIREBASE_API_KEY
+    if not id_token or not isinstance(id_token, str):
+        raise AuthError(400, "A Google ID token is required")
+
+    id_token = id_token.strip()
+
+    # 1. Inspect claims locally
+    claims = decode_jwt_unverified(id_token)
+    aud = claims.get("aud")
+    if aud != project_id:
+        raise AuthError(401, "Google token audience mismatch (expected %s, got %s)" % (project_id, aud))
+
+    iss = claims.get("iss")
+    expected_iss = "https://securetoken.google.com/%s" % project_id
+    if iss != expected_iss:
+        raise AuthError(401, "Google token issuer mismatch")
+
+    exp = claims.get("exp")
+    if exp and isinstance(exp, (int, float)):
+        now_ts = datetime.now(timezone.utc).timestamp()
+        if now_ts > exp:
+            raise AuthError(401, "Google token has expired")
+
+    # 2. Cryptographically verify signature with Google Identity Toolkit
+    url = "https://identitytoolkit.googleapis.com/v1/accounts:lookup?key=%s" % key
+    req_body = json.dumps({"idToken": id_token}).encode("utf-8")
+    req = urllib.request.Request(
+        url,
+        data=req_body,
+        headers={"Content-Type": "application/json", "Accept": "application/json"},
+        method="POST",
+    )
+
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            data = resp.read()
+            lookup_result = json.loads(data.decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        msg = "Invalid Google token"
+        try:
+            err_data = json.loads(exc.read().decode("utf-8"))
+            err_obj = err_data.get("error", {})
+            msg = err_obj.get("message") or msg
+        except Exception:
+            pass
+        raise AuthError(401, "Google sign-in failed: %s" % msg)
+    except Exception as exc:
+        raise AuthError(502, "Could not reach Google authentication service: %s" % exc)
+
+    users = lookup_result.get("users") or []
+    if not users:
+        raise AuthError(401, "No user record returned by Google")
+
+    user_info = users[0]
+
+    email = (user_info.get("email") or claims.get("email") or "").strip().lower()
+    if not email:
+        raise AuthError(422, "Google account has no email address")
+
+    email_verified = user_info.get("emailVerified")
+    if email_verified is None:
+        email_verified = claims.get("email_verified")
+    if str(email_verified).lower() not in ("true", "1"):
+        raise AuthError(403, "Google email address is not verified")
+
+    name = (
+        user_info.get("displayName")
+        or claims.get("name")
+        or email.split("@")[0].capitalize()
+    )
+    sub = user_info.get("localId") or claims.get("sub") or claims.get("user_id")
+
+    return {
+        "sub": sub,
+        "email": email,
+        "email_verified": email_verified,
+        "name": name,
+        "claims": claims,
+    }
+
+
+def check_google_domain(email: str, allowed_domains: tuple[str, ...]) -> None:
+    """Reject an email whose domain is not in the allowlist."""
+    if not allowed_domains:
+        return
+    domain = email.rsplit("@", 1)[-1].lower() if "@" in email else ""
+    if domain not in allowed_domains:
+        allowed_str = ", ".join("@" + d for d in allowed_domains)
+        raise AuthError(403, "Sign-in restricted to %s accounts" % allowed_str)
+
+
+def make_username_from_email(conn: sqlite3.Connection, email: str) -> str:
+    """Derive a valid, unique username from an email address."""
+    local_part = email.split("@")[0].lower()
+    cleaned = re.sub(r"[^a-z0-9._-]", "", local_part)
+    if not cleaned or not cleaned[0].isalnum():
+        cleaned = "u" + cleaned
+    cleaned = cleaned[:24]
+    if len(cleaned) < 2:
+        cleaned = (cleaned + "user")[:24]
+
+    candidate = cleaned
+    counter = 1
+    while get_user(conn, candidate) is not None:
+        candidate = "%s%d" % (cleaned[:20], counter)
+        counter += 1
+    return candidate
+
+
+def authenticate_google(conn: sqlite3.Connection, id_token: str,
+                        project_id: str = None,
+                        allowed_domains: tuple[str, ...] = None,
+                        ip: str = "", _verifier=None):
+    """Authenticate a user using a Firebase Google ID token.
+
+    Verifies the token, validates the domain, links or auto-provisions the user,
+    and returns the fresh user row.
+    """
+    project_id = project_id or FIREBASE_PROJECT_ID
+    allowed_domains = ALLOWED_GOOGLE_DOMAINS if allowed_domains is None else allowed_domains
+
+    if _verifier is not None:
+        payload = _verifier(id_token, project_id)
+    else:
+        payload = verify_firebase_id_token(id_token, project_id)
+
+    email = (payload.get("email") or "").strip().lower()
+    check_google_domain(email, allowed_domains)
+
+    google_sub = str(payload.get("sub") or payload.get("user_id") or "").strip()
+    if not google_sub:
+        raise AuthError(400, "Google token missing user identity")
+
+    # 1. Lookup by google_sub
+    user = conn.execute("SELECT * FROM users WHERE google_sub = ?", (google_sub,)).fetchone()
+
+    # 2. Lookup by email if not yet linked
+    if user is None and email:
+        user = conn.execute(
+            "SELECT * FROM users WHERE email = ? COLLATE NOCASE", (email,)
+        ).fetchone()
+        if user is not None:
+            conn.execute(
+                "UPDATE users SET google_sub = ?, provider = 'google', updated_at = ? WHERE id = ?",
+                (google_sub, utcnow(), user["id"]),
+            )
+            conn.commit()
+            user = conn.execute("SELECT * FROM users WHERE id = ?", (user["id"],)).fetchone()
+
+    # 3. Lookup by matching username if email was not previously filled
+    if user is None and email:
+        prefix = email.split("@")[0].lower()
+        candidate = conn.execute(
+            "SELECT * FROM users WHERE username = ? COLLATE NOCASE AND (google_sub IS NULL OR google_sub = '')",
+            (prefix,),
+        ).fetchone()
+        if candidate is not None:
+            conn.execute(
+                "UPDATE users SET google_sub = ?, email = ?, provider = 'google', updated_at = ? WHERE id = ?",
+                (google_sub, email, utcnow(), candidate["id"]),
+            )
+            conn.commit()
+            user = conn.execute("SELECT * FROM users WHERE id = ?", (candidate["id"],)).fetchone()
+
+    # 4. Auto-provision on first sign-in
+    if user is None:
+        username = make_username_from_email(conn, email)
+        raw_name = (payload.get("name") or "").strip() or username.capitalize()
+        name = clean_name(raw_name[:80])
+        # The very first user to sign in to an empty database becomes administrator
+        is_first = count_users(conn) == 0
+        now = utcnow()
+        cur = conn.execute(
+            "INSERT INTO users (username, name, email, password_hash, provider, google_sub, "
+            "is_admin, is_active, created_at, updated_at) "
+            "VALUES (?, ?, ?, '', 'google', ?, ?, 1, ?, ?)",
+            (username, name, email, google_sub, 1 if is_first else 0, now, now),
+        )
+        conn.commit()
+        user = conn.execute("SELECT * FROM users WHERE id = ?", (cur.lastrowid,)).fetchone()
+
+    if not user["is_active"]:
+        raise AuthError(403, "That account has been deactivated")
+
+    clear_failures(conn, user["username"])
     set_last_login(conn, user["id"])
     conn.commit()
     return conn.execute("SELECT * FROM users WHERE id = ?", (user["id"],)).fetchone()

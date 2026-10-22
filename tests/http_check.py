@@ -123,6 +123,15 @@ def main():
     check("asking who you are works signed out", status == 200, status)
     check("and the answer is nobody", (json_body(body) or {}).get("user") is None)
 
+    status, _, body = call("GET", "/api/auth/config")
+    check("auth config endpoint is public", status == 200, status)
+    cfg = json_body(body) or {}
+    check("auth config returns firebase config", bool(cfg.get("firebase", {}).get("projectId")), cfg)
+    check("auth config returns allowed domains", "holbox.ai" in cfg.get("allowed_domains", []), cfg)
+
+    status, _, body = call("POST", "/api/auth/google", {}, sign_in=True)
+    check("empty Google ID token is rejected with 400", status == 400, status)
+
     status, headers, _ = call("GET", "/some/deep/link", follow=False)
     check("a deep link sends a stranger to sign in", status == 302, status)
     check("and remembers where they were going",
