@@ -83,9 +83,15 @@ export function openCreateIssue(container, state, actions, prefill = {}, onClose
     () => {},
   );
   const assigneeSelect = select(
-    [{ value: '', label: 'Unassigned' }].concat(
-      assignableNames(state, project).map((name) => ({ value: name, label: name })),
-    ),
+    peopleOptions(state, project, { includeEmpty: 'Unassigned' }),
+    state.me,
+    () => {},
+  );
+  // The reporter has always been recorded -- it just used to be taken silently
+  // from whoever was signed in. Making it a field lets an administrator file a
+  // ticket on somebody else's behalf, which is the usual reason to want it.
+  const reporterSelect = select(
+    peopleOptions(state, project, { fallback: state.me }),
     state.me,
     () => {},
   );
@@ -109,19 +115,24 @@ export function openCreateIssue(container, state, actions, prefill = {}, onClose
     ]),
     el('div', { class: 'modal-body' }, [
       titleInput,
+      /* The two people fields sit together at the top: they are the ones
+         people want to set first, and the rest are triage details. */
+      el('div', { class: 'form-grid' }, [
+        labelled('Created by', reporterSelect),
+        labelled('Assigned to', assigneeSelect),
+      ]),
       el('div', { class: 'form-grid' }, [
         labelled('Type', typeSelect),
         labelled('Priority', prioritySelect),
       ]),
       el('div', { class: 'form-grid' }, [
-        labelled('Assignee', assigneeSelect),
         labelled('Status', statusSelect),
+        labelled('Sprint', sprintSelect),
       ]),
       el('div', { class: 'form-grid' }, [
-        labelled('Sprint', sprintSelect),
         labelled('Points', pointsInput),
+        labelled('Labels', labelsInput),
       ]),
-      labelled('Labels', labelsInput),
       labelled('Description', descriptionInput),
       error,
     ]),
@@ -146,6 +157,7 @@ export function openCreateIssue(container, state, actions, prefill = {}, onClose
       type: typeSelect.value,
       priority: prioritySelect.value,
       status: statusSelect.value,
+      reporter: reporterSelect.value,
       assignee: assigneeSelect.value,
       story_points: pointsInput.value === '' ? null : Number(pointsInput.value),
       labels: labelsInput.value,
@@ -229,6 +241,16 @@ function labelled(labelText, control) {
     el('span', { class: 'field-label', text: labelText }),
     control,
   ]);
+}
+
+/* Options for a person picker: the workspace's accounts, plus the project's
+   members, plus whatever the current value is -- so a name that is no longer
+   an account (or not yet a member) still shows instead of silently blanking. */
+function peopleOptions(state, project, { includeEmpty = null, fallback = null } = {}) {
+  const names = assignableNames(state, project);
+  if (fallback && !names.includes(fallback)) names.unshift(fallback);
+  const options = names.map((name) => ({ value: name, label: name }));
+  return includeEmpty ? [{ value: '', label: includeEmpty }].concat(options) : options;
 }
 
 /* ---- manage accounts -------------------------------------------------

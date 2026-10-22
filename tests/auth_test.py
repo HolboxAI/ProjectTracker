@@ -423,6 +423,33 @@ def main():
     check("a ticket can be unassigned again",
           status == 200 and body["issue"]["assignee"] == "", status)
 
+    # --- created by ---------------------------------------------------
+    # The create form offers `reporter` explicitly, so an administrator can
+    # file a ticket on somebody else's behalf. Without that the reporter is
+    # always whoever is signed in, which is wrong for work reported secondhand.
+    status, body = call(db_path, "POST", "/api/issues", {
+        "project": "ASG", "title": "Filed on behalf of someone",
+        "reporter": "Dana Whitfield", "assignee": "Ada Okonkwo",
+    }, user=admin)
+    check("a ticket can be created with an explicit creator",
+          status == 201 and body["issue"]["reporter"] == "Dana Whitfield",
+          (status, body.get("issue", {}).get("reporter")))
+    check("and the assignee is separate from the creator",
+          body["issue"]["assignee"] == "Ada Okonkwo", body["issue"]["assignee"])
+    on_behalf_id = body["issue"]["id"]
+
+    status, body = call(db_path, "GET", "/api/issues/%s" % on_behalf_id, user=admin)
+    check("the activity trail credits the signed-in actor, not the reporter",
+          all(a["actor"] == "Ada Okonkwo" for a in body["activity"]),
+          [a["actor"] for a in body["activity"]])
+
+    status, body = call(db_path, "POST", "/api/issues", {
+        "project": "ASG", "title": "No creator given",
+    }, user=admin)
+    check("an omitted creator falls back to the signed-in person",
+          body["issue"]["reporter"] == "Ada Okonkwo",
+          body.get("issue", {}).get("reporter"))
+
     # --- Firebase Google SSO ---------------------------------------------
     # Domain allowlist
     auth.check_google_domain("alice@holbox.ai", ("holbox.ai", "holbox.com"))
