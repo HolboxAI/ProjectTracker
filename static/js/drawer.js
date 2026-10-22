@@ -4,6 +4,7 @@
 import {
   el, append, clear, typeMark, statusPill, avatar, keyEl,
   relativeTime, formatDate, titleCase, button, select, field, statusLabel,
+  assignableNames,
 } from './ui.js';
 
 let descriptionEditing = false;
@@ -251,7 +252,9 @@ function sideFields(issue, state, actions) {
   const priorities = (state.meta && state.meta.priorities) || [];
   const types = (state.meta && state.meta.types) || [];
 
-  const memberNames = project.members.map((member) => member.name);
+  // Everyone in the workspace, not just this project's members -- plus the
+  // current assignee, which may be a name that is no longer anyone's account.
+  const memberNames = assignableNames(state, project);
   if (issue.assignee && !memberNames.includes(issue.assignee)) memberNames.push(issue.assignee);
 
   const assigneeOptions = [{ value: '', label: 'Unassigned' }]

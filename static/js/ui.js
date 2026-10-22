@@ -313,6 +313,24 @@ export function sumPoints(issues) {
   return issues.reduce((total, issue) => total + (issue.story_points || 0), 0);
 }
 
+/* Everyone a ticket can be assigned to.
+
+   The accounts on this instance, plus any name the project already carries
+   that is not an account -- a member from before accounts existed, or a name
+   somebody typed. Offering only project members was the problem: a new project
+   starts with its lead as its only member, so the assignee picker looked empty
+   even though the workspace had people in it. */
+export function assignableNames(state, project) {
+  const names = new Set();
+  ((state && state.people) || []).forEach((person) => {
+    if (person && person.name) names.add(person.name);
+  });
+  ((project && project.members) || []).forEach((member) => {
+    if (member && member.name) names.add(member.name);
+  });
+  return [...names].sort((a, b) => a.localeCompare(b));
+}
+
 export function button(label, { variant = 'quiet', onClick, icon: iconName, size = '', title } = {}) {
   const classes = ['btn', `btn-${variant}`];
   if (size) classes.push(`btn-${size}`);

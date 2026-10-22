@@ -12,6 +12,16 @@
 
 ## Conventions
 
+- **Assignee pickers read `assignableNames(state, project)` from `ui.js`**, not
+  `project.members`. Members are only the people who have actually worked on a
+  project (the creator, then anyone assigned), so a brand-new project has one
+  member and a member-only list looks empty. `assignableNames` unions the
+  workspace's accounts (`state.people`, from `/api/bootstrap`) with the
+  project's members, which keeps historical names selectable too. The same list
+  drives the create form, the issue drawer and the toolbar filter — change it in
+  `ui.js` and all three follow. Assigning somebody to an issue adds them to
+  `members` server-side, so the two converge over time.
+
 - `static/design-tokens.css` is the only file that defines colours, type and
   spacing. Nothing else hardcodes a hex. Changing an accent means re-checking
   it against `--surface` and `--surface-raised` in both light and dark.

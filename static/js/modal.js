@@ -3,7 +3,7 @@
    Errors from the API are shown inside the form rather than as a toast --
    the person is looking at the form, and a field problem belongs there. */
 
-import { el, clear, button, select, titleCase, relativeTime } from './ui.js';
+import { el, clear, button, select, titleCase, relativeTime, assignableNames } from './ui.js';
 
 let active = null;
 
@@ -84,7 +84,7 @@ export function openCreateIssue(container, state, actions, prefill = {}, onClose
   );
   const assigneeSelect = select(
     [{ value: '', label: 'Unassigned' }].concat(
-      project.members.map((member) => ({ value: member.name, label: member.name })),
+      assignableNames(state, project).map((name) => ({ value: name, label: name })),
     ),
     state.me,
     () => {},

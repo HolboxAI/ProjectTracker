@@ -198,6 +198,10 @@ def bootstrap(ctx):
         "         ORDER BY s.id LIMIT 1) AS active_sprint "
         "  FROM projects p ORDER BY p.id"
     ).fetchall()
+    people = ctx.conn.execute(
+        "SELECT name, username FROM users WHERE is_active = 1 "
+        "ORDER BY name COLLATE NOCASE"
+    ).fetchall()
     return 200, {
         "projects": [
             {
@@ -217,6 +221,14 @@ def bootstrap(ctx):
             "types": db.TYPES,
             "sprint_statuses": db.SPRINT_STATUSES,
         },
+        # Who a ticket can be assigned to. This is the workspace's people, not
+        # a project's members: a new project starts with only its lead as a
+        # member, so offering just members left the assignee picker with one
+        # name in it. Names and usernames only -- nothing here is private from
+        # a colleague who can already see who reported and closed an issue.
+        "people": [
+            {"name": p["name"], "username": p["username"]} for p in people
+        ],
         # `me` stays a plain display name: the client uses it as the default
         # assignee and comment author. `user` is the account behind it.
         "me": ctx.actor,

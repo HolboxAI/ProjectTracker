@@ -359,6 +359,70 @@ def main():
     check("bootstrap says nobody is signed in without a user",
           call(db_path, "GET", "/api/bootstrap")[1]["user"] is None)
 
+    # --- who can a ticket be assigned to ---------------------------------
+    # The picker is driven by `people`, and it has to be the workspace's
+    # accounts rather than a project's members: a project starts with only its
+    # lead as a member, which is why the assignee list used to look empty.
+    names = {p["name"] for p in body["people"]}
+    check("bootstrap lists the workspace's people", {"Ada Okonkwo", "Dana Whitfield"} <= names,
+          sorted(names))
+    check("people carry a username too",
+          all(p.get("username") for p in body["people"]), body["people"])
+
+    conn = db.connect(db_path)
+    try:
+        # A deactivated colleague should not be offered as an assignee.
+        sleeper = auth.create_user(conn, name="Off Shift", username="offshift",
+                                  password="correct-horse-9", rounds=FAST)
+        conn.commit()
+        auth.set_active(conn, sleeper["id"], False)
+        conn.commit()
+    finally:
+        conn.close()
+    status, body = call(db_path, "GET", "/api/bootstrap", user=admin)
+    check("a deactivated account is not offered as an assignee",
+          "Off Shift" not in {p["name"] for p in body["people"]})
+
+    # Assign to somebody who is not a member of the project yet. A project made
+    # through the app starts with its creator as the only member -- that is the
+    # situation where the assignee picker used to look empty.
+    status, project = call(db_path, "POST", "/api/projects", {
+        "key": "ASG", "name": "Assignable", "lead": "Ada Okonkwo",
+    }, user=admin)
+    check("a project made in the app is created", status == 201, status)
+    status, project = call(db_path, "GET", "/api/projects/ASG", user=admin)
+    check("a fresh project starts with only its lead as a member",
+          len(project["members"]) == 1, project["members"])
+
+    status, body = call(db_path, "POST", "/api/issues", {
+        "project": "ASG", "title": "Assign to a colleague", "assignee": "Dana Whitfield",
+    }, user=admin)
+    check("a ticket can be created already assigned to a colleague",
+          status == 201 and body["issue"]["assignee"] == "Dana Whitfield",
+          (status, body.get("issue", {}).get("assignee")))
+    assigned_id = body["issue"]["id"]
+
+    status, project = call(db_path, "GET", "/api/projects/ASG", user=admin)
+    check("assigning somebody adds them to the project's members",
+          "Dana Whitfield" in {m["name"] for m in project["members"]},
+          project["members"])
+
+    # And reassigning an existing ticket works the same way.
+    status, body = call(db_path, "PATCH", "/api/issues/%s" % assigned_id,
+                        {"assignee": "Ada Okonkwo"}, user=admin)
+    check("an existing ticket can be reassigned to a colleague",
+          status == 200 and body["issue"]["assignee"] == "Ada Okonkwo", status)
+    status, body = call(db_path, "GET", "/api/issues/%s" % assigned_id, user=admin)
+    check("the reassignment lands in the activity trail",
+          any(a["field"] == "assignee" and a["to"] == "Ada Okonkwo"
+              for a in body["activity"]),
+          [(a["field"], a["to"]) for a in body["activity"]])
+
+    status, body = call(db_path, "PATCH", "/api/issues/%s" % assigned_id,
+                        {"assignee": ""}, user=admin)
+    check("a ticket can be unassigned again",
+          status == 200 and body["issue"]["assignee"] == "", status)
+
     # --- Firebase Google SSO ---------------------------------------------
     # Domain allowlist
     auth.check_google_domain("alice@holbox.ai", ("holbox.ai", "holbox.com"))

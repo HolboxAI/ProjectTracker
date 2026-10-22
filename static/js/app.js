@@ -11,7 +11,7 @@ import * as issuesView from './issues.js';
 import * as reportsView from './reports.js';
 import * as drawer from './drawer.js';
 import { openCreateIssue, openCreateProject, openUsers, close as closeModal, isOpen as modalOpen } from './modal.js';
-import { el, clear, svgIcon, button, avatar } from './ui.js';
+import { el, clear, svgIcon, button, avatar, assignableNames } from './ui.js';
 
 const VIEWS = ['board', 'backlog', 'issues', 'reports'];
 const NAV = [
@@ -38,6 +38,9 @@ const state = {
   // The account behind `me`: null until bootstrap answers, and the only thing
   // that decides whether the rail offers account management.
   user: null,
+  // Every active account, for the assignee pickers. Project members alone are
+  // not enough -- see assignableNames() in ui.js.
+  people: [],
   meta: { statuses: [], priorities: [], types: [] },
   projects: [],
   projectKey: null,
@@ -97,6 +100,7 @@ async function ensureBootstrap() {
   state.me = boot.me;
   state.projects = boot.projects;
   state.user = boot.user || null;
+  state.people = boot.people || [];
   // `me` is the display name the views use as a default assignee and comment
   // author; `user` is the account it belongs to.
   state.me = boot.me || (state.user ? state.user.name : 'You');
@@ -618,9 +622,9 @@ function buildFilters() {
   clear(dom.filters);
   activeFilterKey = state.projectKey;
 
-  const members = state.project ? state.project.members.map((member) => member.name) : [];
+  const people = assignableNames(state, state.project);
   const assigneeOptions = [{ value: 'all', label: 'Anyone' }, { value: 'unassigned', label: 'Unassigned' }]
-    .concat(members.map((name) => ({ value: name, label: name })));
+    .concat(people.map((name) => ({ value: name, label: name })));
 
   const make = (name, options, current) => {
     const node = el('select', {
