@@ -1,0 +1,49 @@
+[Unit]
+Description=Covex-Board issue tracker
+Documentation=file:/opt/covex-tracker/README.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=covex
+Group=covex
+WorkingDirectory=/opt/covex-tracker
+
+# Everything the process creates -- the database and its WAL sidecars -- should
+# be private by default. The state directory is already 0750, so this is the
+# second lock: the file itself is not readable either.
+UMask=0077
+
+# Bound to loopback: nginx is the only thing that talks to this process, and
+# it is the thing that decides who gets in.
+# --no-seed: a real deployment starts empty. The demo workspace would
+# otherwise be permanent, because no route deletes a project.
+ExecStart=/usr/bin/python3 /opt/covex-tracker/server.py \
+  --host 127.0.0.1 --port 8077 --no-seed \
+  --db /var/lib/covex-tracker/tracker.sqlite3
+
+# The app is one process over one SQLite file by contract. Restart it if it
+# dies; never run two copies -- systemd's own start rate limit catches a crash
+# loop, so a restart cannot become a supervisor for two writers.
+Restart=on-failure
+RestartSec=2
+
+# --- hardening ----------------------------------------------------------
+# Everything the process needs is above: a read-only code directory, one
+# writable state directory, and a private /tmp for SQLite's scratch files.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+ReadWritePaths=/var/lib/covex-tracker
+
+[Install]
+WantedBy=multi-user.target

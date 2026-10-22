@@ -1,0 +1,32 @@
+# Local secrets. Real Google OAuth values go in the instance's environment,
+# never here -- .env is listed first for that reason.
+.env
+
+# The live database. It holds every project, and the account digests. The
+# server's copy is the only one that matters; committing this would put
+# production data in history where it cannot be removed.
+*.sqlite3
+*.sqlite3-shm
+*.sqlite3-wal
+*.sqlite3.bak
+backup-*.sqlite3
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Editor / OS
+.DS_Store
+.idea/
+.vscode/
+*.swp
+
+# Private keys. Every *.pem here is a credential -- the instance key pair we
+# create for deployment lands in ~/.ssh, never in the repository.
+*.pem
+*.key
+
+# Deployment leftovers
+/tmp/covex-tracker*.tgz

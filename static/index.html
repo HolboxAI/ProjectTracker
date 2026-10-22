@@ -1,0 +1,75 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Covex-Board</title>
+<meta name="description" content="Covex-Board: boards, sprints and backlogs for a small team.">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect width='16' height='16' rx='3' fill='%230f5f63'/%3E%3Cpath d='M4 5h8v1.6a1.4 1.4 0 0 0 0 2.8V11H4V9.4a1.4 1.4 0 0 0 0-2.8z' fill='%23fff'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="/design-tokens.css">
+<link rel="stylesheet" href="/app.css">
+<script>
+  /* Resolve the theme before first paint. Without this, a reload on a
+     dark-preference machine paints the light palette and then swaps it.
+     The stored choice wins; "system" follows the OS. app.js owns the switch
+     itself and keeps data-theme-choice in step. */
+  (function () {
+    var choice = 'system';
+    try {
+      var stored = localStorage.getItem('covex-theme');
+      if (stored === 'light' || stored === 'dark' || stored === 'system') choice = stored;
+    } catch (error) { /* storage blocked -- stay on system */ }
+    var dark = choice === 'dark'
+      || (choice === 'system' && window.matchMedia('(prefers-color-scheme: dark)').matches);
+    var root = document.documentElement;
+    root.setAttribute('data-theme', dark ? 'dark' : 'light');
+    root.setAttribute('data-theme-choice', choice);
+  }());
+</script>
+<script>
+  /* The client is a module bundle: if any of it fails to parse or throws
+     before the first paint, the page would otherwise just be blank. Put the
+     reason on screen instead of only in the console. */
+  (function () {
+    function showFatal(message) {
+      var box = document.getElementById('fatal');
+      if (!box) {
+        box = document.createElement('pre');
+        box.id = 'fatal';
+        box.setAttribute('role', 'alert');
+        box.style.cssText = 'position:fixed;left:0;right:0;bottom:0;z-index:999;margin:0;'
+          + 'padding:12px;background:#ab2418;color:#fff;font:12px/1.5 ui-monospace,Menlo,monospace;'
+          + 'white-space:pre-wrap;max-height:40vh;overflow:auto';
+        document.body.appendChild(box);
+      }
+      box.textContent += message + '\n';
+    }
+    window.addEventListener('error', function (event) {
+      showFatal((event.message || 'Script error') + (event.lineno ? '  (line ' + event.lineno + ')' : ''));
+    });
+    window.addEventListener('unhandledrejection', function (event) {
+      var reason = event.reason;
+      showFatal('Unhandled: ' + ((reason && reason.message) || reason));
+    });
+  }());
+</script>
+</head>
+<body>
+
+<div class="app" id="app">
+  <aside class="rail" id="rail" aria-label="Workspace navigation"></aside>
+
+  <main class="workspace">
+    <header class="topbar" id="topbar"></header>
+    <div class="view" id="view" tabindex="-1"></div>
+  </main>
+</div>
+
+<div class="scrim" id="scrim" hidden></div>
+<aside class="drawer" id="drawer" role="dialog" aria-modal="true" aria-label="Issue detail" hidden></aside>
+<div class="modal-layer" id="modal-layer" hidden></div>
+<div class="toast-stack" id="toasts" aria-live="polite" aria-atomic="false"></div>
+
+<script type="module" src="/js/app.js"></script>
+</body>
+</html>
