@@ -71,6 +71,30 @@
   library only. `MAX_REQUEST_BYTES` in `server.py` caps the request before it is
   read; keep it clear of `storage.MAX_BYTES * 4/3` or a legal file will 413.
 
+- **Email is queued, never sent from a request handler.** `tracker/notify.py`
+  writes a `notifications` row inside the same transaction as the change; the
+  daemon thread `notification_worker` in `server.py` drains it every
+  `COVEX_MAIL_INTERVAL` seconds (default 15). Do not call `mailer.send` from
+  `api.py` — an SMTP round trip would hold the write lock and make a board drag
+  feel broken whenever the mail server is slow.
+
+- Mail is **opt-in by configuration**: `mailer.configured()` is false unless
+  `SMTP_HOST` and `SMTP_FROM` are both set, and then everything runs as before
+  with the queue waiting. `smtplib` is stdlib, so this needs no dependency. On
+  the instance the settings come from `/etc/covex-tracker.env` via
+  `EnvironmentFile=-` in the unit (the `-` keeps it optional); locally from
+  `.env`.
+
+- The tests **never send mail**. They assert on `notifications` rows and pass a
+  fake `sender=` to `notify.drain`. Keep it that way — a suite that needs a
+  mail server cannot run on a laptop or in CI.
+
+- Assignees are stored on a ticket as a **display name**, not a user id, so
+  `notify._account_by_name` resolves name → account and a ticket assigned to
+  somebody who is not an account simply produces no mail. Mentions match
+  `@Full Name` or `@username`, longest name first — a `\w+` scan would stop at
+  the space in "Mei Tan".
+
 ## Authentication
 
 - Accounts, hashing and sessions live in `tracker/auth.py`; **all cookie

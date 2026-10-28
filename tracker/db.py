@@ -113,6 +113,27 @@ CREATE INDEX IF NOT EXISTS idx_comments_issue ON comments(issue_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_activity_issue ON activity(issue_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_attachments_issue   ON attachments(issue_id);
 CREATE INDEX IF NOT EXISTS idx_attachments_comment ON attachments(comment_id);
+
+-- Outgoing mail, queued rather than sent. The row is written in the same
+-- transaction as the change that caused it, so a crash after the ticket saved
+-- cannot lose the notification; `sent_at IS NULL` is the queue and the sender
+-- thread in server.py works it down. Nothing here is sent inline: an SMTP
+-- round trip must not hold the request or the write lock.
+CREATE TABLE IF NOT EXISTS notifications (
+  id             INTEGER PRIMARY KEY AUTOINCREMENT,
+  issue_id       INTEGER NOT NULL REFERENCES issues(id) ON DELETE CASCADE,
+  recipient      TEXT    NOT NULL,
+  recipient_name TEXT    NOT NULL DEFAULT '',
+  reason         TEXT    NOT NULL,
+  subject        TEXT    NOT NULL,
+  body           TEXT    NOT NULL,
+  created_at     TEXT    NOT NULL,
+  sent_at        TEXT,
+  attempts       INTEGER NOT NULL DEFAULT 0,
+  last_error     TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_notifications_pending ON notifications(sent_at, id);
 """
 
 ISSUE_SELECT = """

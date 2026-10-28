@@ -19,6 +19,14 @@ UMask=0077
 # it is the thing that decides who gets in.
 # --no-seed: a real deployment starts empty. The demo workspace would
 # otherwise be permanent, because no route deletes a project.
+
+# Secrets -- the SMTP password above all -- live here rather than in the code
+# directory or the repository. The leading `-` means the unit starts exactly as
+# before when the file has not been written; set it up with:
+#   sudo install -m 600 /dev/null /etc/covex-tracker.env
+#   sudo editor /etc/covex-tracker.env      # SMTP_HOST=... etc.
+EnvironmentFile=-/etc/covex-tracker.env
+
 ExecStart=/usr/bin/python3 /opt/covex-tracker/server.py \
   --host 127.0.0.1 --port 8077 --no-seed \
   --db /var/lib/covex-tracker/tracker.sqlite3
@@ -32,6 +40,10 @@ RestartSec=2
 # --- hardening ----------------------------------------------------------
 # Everything the process needs is above: a read-only code directory, one
 # writable state directory, and a private /tmp for SQLite's scratch files.
+#
+# AF_INET/AF_INET6 are also what the mail sender needs: it opens an outbound
+# SMTP connection from the notification thread. Narrowing this further would
+# silently disable notifications.
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict

@@ -14,7 +14,7 @@ import re
 import sqlite3
 import urllib.parse
 
-from . import auth, db, storage
+from . import auth, db, notify, storage
 
 # Fallback attribution for callers with no signed-in user -- the CLI and the
 # API tests. A real request always carries one, and `Ctx.actor` then returns
@@ -462,7 +462,12 @@ def create_issue(ctx):
     if sprint_id:
         sprint = _sprint_or_404(ctx, sprint_id)
         db.log_activity(ctx.conn, issue_id, ctx.actor, "sprint", None, sprint["name"])
-    return 201, {"issue": db.serialize_issue(_issue_or_404(ctx, issue_id))}
+    # Queued in this same transaction: if the issue does not save, no mail is
+    # owed, and if it does, the row is already here for the sender thread.
+    created_row = _issue_or_404(ctx, issue_id)
+    if assignee:
+        notify.notify_assignment(ctx.conn, created_row, ctx.actor, assignee)
+    return 201, {"issue": db.serialize_issue(created_row)}
 
 
 @route("GET", r"/api/issues/(?P<issue_id>\d+)")
@@ -587,7 +592,16 @@ def update_issue(ctx, issue_id):
     elif "status" in updates:
         db.reorder_issue(ctx.conn, row["id"], updates["status"], None)
 
-    return 200, {"issue": db.serialize_issue(_issue_or_404(ctx, int(issue_id)))}
+    saved = _issue_or_404(ctx, int(issue_id))
+    # A reassignment is its own message, to the person arriving rather than the
+    # one leaving; anything else goes to whoever is now on the ticket. The
+    # sender thread does the sending -- see notify.py for why this is a queue.
+    if "assignee" in updates:
+        notify.notify_assignment(ctx.conn, saved, ctx.actor, saved["assignee"], row["assignee"])
+    if changes and "assignee" not in updates:
+        notify.notify_change(ctx.conn, saved, ctx.actor, changes)
+
+    return 200, {"issue": db.serialize_issue(saved)}
 
 
 @route("POST", r"/api/issues/(?P<issue_id>\d+)/comments")
@@ -613,6 +627,8 @@ def add_comment(ctx, issue_id):
         )
     ctx.conn.execute("UPDATE issues SET updated_at = ? WHERE id = ?", (db.utcnow(), row["id"]))
     db.log_activity(ctx.conn, row["id"], ctx.actor, "comment", None, None)
+    # Whoever is @mentioned, plus the assignee if they were not one of them.
+    notify.notify_comment(ctx.conn, _issue_or_404(ctx, row["id"]), ctx.actor, body)
     comment = ctx.conn.execute("SELECT * FROM comments WHERE id = ?", (comment_id,)).fetchone()
     return 201, {"comment": _comment_payload(ctx.conn, comment)}
 

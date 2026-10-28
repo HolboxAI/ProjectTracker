@@ -318,6 +318,128 @@ def main():
     status, _ = call(db_path, "POST", "/api/issues/%d/comments" % new_id, body={"body": "  "})
     check("still rejects a comment with neither text nor file", status == 400, status)
 
+    # --- email notifications --------------------------------------------
+    # Nothing is sent here: the queue is what these assert. Send happens on the
+    # sender thread in server.py, which the tests never start -- see notify.py.
+    from tracker import auth, notify  # noqa: E402 -- only this section needs them
+
+    conn = db.connect(db_path)
+    try:
+        for name, username in [("Priya Raman", "priya"), ("Mei Tan", "mei"),
+                               ("Jonas Weber", "jonas")]:
+            auth.create_user(conn, name=name, username=username,
+                             password="test-pass-123", email="%s@holbox.ai" % username)
+        conn.commit()
+    finally:
+        conn.close()
+
+    def queued():
+        c = db.connect(db_path)
+        try:
+            return c.execute(
+                "SELECT recipient_name, reason, subject FROM notifications "
+                " WHERE issue_id = ? ORDER BY id", (new_id,)).fetchall()
+        finally:
+            c.close()
+
+    def clear():
+        c = db.connect(db_path)
+        try:
+            c.execute("DELETE FROM notifications")
+            c.commit()
+        finally:
+            c.close()
+
+    clear()
+    status, assigned = call(db_path, "PATCH", "/api/issues/%d" % new_id,
+                            body={"assignee": "Mei Tan"})
+    check("assigning the ticket queues a mail", status == 200 and len(queued()) == 1, queued())
+    row = queued()[0] if queued() else None
+    check("it goes to the new assignee", row and row["recipient_name"] == "Mei Tan", row)
+    check("and says it was an assignment", row and row["reason"] == notify.ASSIGNED, row)
+    check("the subject carries the ticket key",
+          row and row["subject"].startswith("[PHX-"), row["subject"] if row else None)
+
+    # Reassignment is its own message, to the person arriving.
+    clear()
+    call(db_path, "PATCH", "/api/issues/%d" % new_id, body={"assignee": "Priya Raman"})
+    check("reassigning mails the person arriving, not the one leaving",
+          [r["recipient_name"] for r in queued()] == ["Priya Raman"], queued())
+
+    clear()
+    call(db_path, "PATCH", "/api/issues/%d" % new_id, body={"assignee": "Priya Raman"})
+    check("assigning the same person again sends nothing", len(queued()) == 0, queued())
+
+    clear()
+    call(db_path, "PATCH", "/api/issues/%d" % new_id, body={"status": "in_progress"})
+    check("a status change mails the assignee",
+          [r["reason"] for r in queued()] == [notify.UPDATED], queued())
+    check("with the new value in the message",
+          "in progress" in db.connect(db_path).execute(
+              "SELECT body FROM notifications ORDER BY id DESC LIMIT 1").fetchone()[0])
+
+    clear()
+    call(db_path, "PATCH", "/api/issues/%d" % new_id, body={"priority": "low"})
+    check("an unrelated edit also mails the assignee",
+          [r["reason"] for r in queued()] == [notify.UPDATED], queued())
+
+    clear()
+    call(db_path, "POST", "/api/issues/%d/comments" % new_id,
+         body={"body": "@Mei Tan can you look? cc @jonas"})
+    reasons = sorted(r["reason"] for r in queued())
+    check("a mention notifies the mentioned person", notify.MENTIONED in reasons, queued())
+    check("a mention by username works too",
+          any(r["recipient_name"] == "Jonas Weber" for r in queued()), queued())
+    check("and the assignee still hears about the comment",
+          reasons.count(notify.MENTIONED) == 2 and notify.COMMENTED in reasons, queued())
+    check("a name with a space is matched whole, not by its first word",
+          all(r["recipient_name"] != "Mei" for r in queued()), queued())
+
+    clear()
+    call(db_path, "POST", "/api/issues/%d/comments" % new_id, body={"body": "no mention here"})
+    check("a comment with no mention only mails the assignee",
+          [r["reason"] for r in queued()] == [notify.COMMENTED], queued())
+
+    clear()
+    call(db_path, "PATCH", "/api/issues/%d" % new_id, body={"assignee": ""})
+    check("unassigning sends nobody anything", len(queued()) == 0, queued())
+
+    status, _ = call(db_path, "POST", "/api/issues", body={
+        "project": "PHX", "title": "Notified on creation", "assignee": "Priya Raman"})
+    check("a ticket assigned at creation queues a mail too", status == 201, status)
+
+    # The queue drains against a fake sender, so no SMTP is involved.
+    conn = db.connect(db_path)
+    try:
+        outbox = []
+        sent, failed = notify.drain(conn, sender=lambda to, s, b: outbox.append((to, s)))
+        check("the queue drains", sent > 0 and failed == 0, (sent, failed))
+        check("and hands the message to the sender",
+              any(to.endswith("@holbox.ai") for to, _ in outbox), outbox)
+        check("nothing is left pending", notify.pending_count(conn) == 0,
+              notify.pending_count(conn))
+    finally:
+        conn.close()
+
+    conn = db.connect(db_path)
+    try:
+        notify.enqueue(conn, dict(id=new_id, key="PHX-1", title="t", status="todo",
+                                  priority="low", assignee="Priya Raman",
+                                  project_key="PHX", number=1),
+                       {"name": "Priya Raman", "email": "priya@holbox.ai"},
+                       notify.UPDATED, "Someone")
+        conn.commit()
+        sent, failed = notify.drain(conn, sender=lambda *a: (_ for _ in ()).throw(
+            RuntimeError("smtp down")))
+        failed_row = conn.execute(
+            "SELECT attempts, last_error FROM notifications ORDER BY id DESC LIMIT 1").fetchone()
+        check("a send failure is recorded, not raised",
+              failed == 1 and failed_row["attempts"] == 1, (sent, failed))
+        check("and the reason is kept for the next look",
+              "smtp down" in (failed_row["last_error"] or ""), failed_row["last_error"])
+    finally:
+        conn.close()
+
     # --- routing --------------------------------------------------------
     status, _ = call(db_path, "GET", "/api/nonsense")
     check("unknown API path 404s", status == 404, status)

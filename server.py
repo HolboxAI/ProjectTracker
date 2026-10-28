@@ -30,10 +30,12 @@ import json
 import os
 import re
 import sys
+import threading
+import time
 import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-from tracker import api, auth, db, storage
+from tracker import api, auth, db, mailer, notify, storage
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 STATIC_DIR = os.path.join(BASE_DIR, "static")
@@ -433,8 +435,71 @@ class Handler(BaseHTTPRequestHandler):
         return "." not in basename or basename.endswith(".html")
 
 
+# How often the sender thread looks for queued mail. Short enough that a
+# notification feels immediate, long enough to be a rounding error on CPU.
+MAIL_INTERVAL = float(os.environ.get("COVEX_MAIL_INTERVAL") or 15)
+
+
+def notification_worker(db_path, stop=None):
+    """Drain the notification queue on its own thread.
+
+    Separate from the request path on purpose: `smtplib` takes a second or more
+    per message, and a PATCH that waited for it would make the board feel
+    broken whenever the mail server was slow. Each pass uses its own connection
+    because a SQLite connection is not shared between threads.
+
+    Every failure is contained -- a mail server being down must never take the
+    web app with it.
+    """
+    while stop is None or not stop.is_set():
+        try:
+            conn = db.connect(db_path)
+            try:
+                sent, failed = notify.drain(conn)
+            finally:
+                conn.close()
+            if sent or failed:
+                sys.stderr.write("  mail: %d sent, %d failed\n" % (sent, failed))
+        except Exception as exc:  # noqa: BLE001
+            sys.stderr.write("  mail: worker pass failed: %s\n" % exc)
+        time.sleep(MAIL_INTERVAL)
+
+
+def _flush_notifications(args):
+    db.init_db(args.db, with_demo=False)
+    conn = db.connect(args.db)
+    try:
+        if not mailer.configured():
+            sys.exit("SMTP is not configured. Set SMTP_HOST and SMTP_FROM "
+                     "(see tracker/mailer.py for the full list).")
+        queued = notify.pending_count(conn)
+        sent, failed = notify.drain(conn)
+    finally:
+        conn.close()
+    print("%d queued, %d sent, %d failed." % (queued, sent, failed))
+
+
+def _test_email(args):
+    db.init_db(args.db, with_demo=False)
+    config = mailer.settings()
+    if config is None:
+        sys.exit("SMTP is not configured. Set SMTP_HOST and SMTP_FROM "
+                 "(see tracker/mailer.py for the full list).")
+    try:
+        mailer.send(
+            args.test_email,
+            "[Covex-Board] Test message",
+            "This is a test from %s.\n\nIf you are reading it, SMTP works:\n"
+            "  host %s:%s, security %s, from %s\n"
+            % (mailer.app_url(), config["host"], config["port"],
+               config["security"], config["sender"]),
+        )
+    except Exception as exc:  # noqa: BLE001
+        sys.exit("Sending failed: %s: %s" % (type(exc).__name__, exc))
+    print("Sent to %s via %s:%s." % (args.test_email, config["host"], config["port"]))
+
 # --------------------------------------------------------------------------
-# accounts from the command line
+# accounts and mail from the command line
 # --------------------------------------------------------------------------
 
 def _resolve_password(explicit, label):
@@ -586,6 +651,10 @@ def main(argv=None):
                                           "Omit to be prompted, or to have one generated.")
     parser.add_argument("--admin", action="store_true",
                         help="make the account an administrator, for --add-user")
+    parser.add_argument("--flush-notifications", action="store_true",
+                        help="send any queued email and exit")
+    parser.add_argument("--test-email", metavar="ADDRESS",
+                        help="send one test message with the configured SMTP settings")
     args = parser.parse_args(argv)
 
     if args.fresh and os.path.exists(args.db):
@@ -604,6 +673,12 @@ def main(argv=None):
     if args.reset_password:
         _reset_password(args)
         return
+    if args.flush_notifications:
+        _flush_notifications(args)
+        return
+    if args.test_email:
+        _test_email(args)
+        return
 
     db.init_db(args.db, with_demo=not args.no_seed)
 
@@ -619,6 +694,25 @@ def main(argv=None):
 
     httpd = ThreadingHTTPServer((args.host, args.port), Handler)
     httpd.db_path = args.db
+
+    # Mail is opt-in by configuration, never required: with no SMTP_HOST the
+    # app runs exactly as before and the queue simply waits.
+    if mailer.configured():
+        threading.Thread(
+            target=notification_worker, args=(args.db,), daemon=True, name="mailer"
+        ).start()
+        print("Email notifications: on (every %gs)" % MAIL_INTERVAL)
+    else:
+        conn = db.connect(args.db)
+        try:
+            waiting = notify.pending_count(conn)
+        finally:
+            conn.close()
+        print("Email notifications: off -- set SMTP_HOST and SMTP_FROM to enable")
+        if waiting:
+            print("  %d notification(s) are queued and will send once it is configured"
+                  % waiting)
+
     url = "http://%s:%d" % (args.host, args.port)
     print("Tracker running at %s" % url)
     print("Database: %s" % args.db)

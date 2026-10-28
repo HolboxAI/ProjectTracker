@@ -107,6 +107,38 @@ POST   /api/sprints/{id}/reopen
 DELETE /api/sprints/{id}
 ```
 
+## Email notifications
+
+People on a ticket hear about it by email: whoever it is assigned to, and
+anybody `@mentioned` in a comment. It is off until SMTP is configured, and the
+app runs normally without it.
+
+```sh
+SMTP_HOST=smtp.example.com     SMTP_PORT=587
+SMTP_USER=tracker@holbox.ai    SMTP_PASSWORD=...
+SMTP_FROM='Covex-Board <tracker@holbox.ai>'
+SMTP_SECURITY=starttls         # or ssl for 465, none for a local relay
+APP_BASE_URL=https://tracker.holbox.ai
+```
+
+On the instance these live in `/etc/covex-tracker.env` (mode 600), which the
+systemd unit reads through `EnvironmentFile=`. Locally they can go in `.env`.
+
+```sh
+python3 server.py --test-email you@holbox.ai   # prove the settings work
+python3 server.py --flush-notifications        # send what is queued, now
+```
+
+**Nothing is sent from the request path.** A notification row is written in the
+same transaction as the change, and a background thread drains it, so a ticket
+edit never waits on `smtplib`. A failure is recorded on the row and retried a
+few times; a mail server that is down for a minute does not lose the message,
+and a wrong password does not retry forever. You are never emailed about your
+own action.
+
+Mentions match `@Full Name` (names contain spaces, so the known names are
+matched longest-first) or `@username`.
+
 ## Accounts
 
 The app is behind a sign-in screen: nothing is served to a visitor without a
