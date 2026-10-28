@@ -42,6 +42,35 @@
   `.drawer` transition in `app.css` has to stay at or under 180ms (`--dur`).
   A nicer 300ms slide gets cut off mid-flight on close.
 
+- **There is no route that deletes an issue, on purpose.** `DELETE
+  /api/issues/{id}` was removed; sprints and accounts still delete. A ticket
+  is the record of something reported, so it is retired by moving it to `done`.
+  Do not re-add the route or a "delete" button in the drawer.
+
+- Attachments belong to a **comment**, not to the issue (`attachments.comment_id`),
+  and are null between upload and the comment that claims them: the client
+  uploads, then posts the comment with `attachment_ids`. A comment made only of
+  a screenshot has an empty `body`, which `add_comment` allows.
+
+- **Attachment bytes are files on disk, not rows.** `tracker/storage.py` writes
+  them into an `attachments/` directory beside the database file (path read from
+  `PRAGMA database_list`, so a backup is a copy of two paths). The DB keeps only
+  metadata. `stored_name` is a random id + an extension earned by sniffing magic
+  numbers — never the client's filename, which is only a display label.
+
+- **`GET /api/attachments/{id}/content` is handled in `server.py`, not through
+  `api.handle`**, because it returns bytes with their own `Content-Type`. It is
+  `api.read_attachment`, and `_finish` therefore accepts a 4-tuple
+  `(status, payload, headers, content_type)`. Only magic-checked images are
+  served `inline`; everything else is `application/octet-stream` +
+  `Content-Disposition: attachment` + `X-Content-Type-Options: nosniff`, so an
+  uploaded `.html`/`.svg` can never render on this origin. `file.type` from the
+  browser is never trusted.
+
+- Uploads are base64 inside JSON, not multipart — this server is standard
+  library only. `MAX_REQUEST_BYTES` in `server.py` caps the request before it is
+  read; keep it clear of `storage.MAX_BYTES * 4/3` or a legal file will 413.
+
 ## Authentication
 
 - Accounts, hashing and sessions live in `tracker/auth.py`; **all cookie

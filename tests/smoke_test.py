@@ -9,6 +9,7 @@ server does (one connection per request), and asserts on the real responses.
 
 from __future__ import annotations
 
+import base64
 import json
 import os
 import sys
@@ -252,11 +253,70 @@ def main():
     check("stats carry a recently-updated list", len(stats["recent"]) > 0)
     check("stats carry an assignee breakdown", len(stats["by_assignee"]) > 0)
 
-    # --- delete ---------------------------------------------------------
+    # --- deletion is not offered ----------------------------------------
+    # A ticket is the record of something reported; there is no route that
+    # removes one, so the attempt has to 404 rather than quietly succeed.
     status, _ = call(db_path, "DELETE", "/api/issues/%d" % new_id)
-    check("deletes an issue", status == 200, status)
+    check("deleting an issue is not a route", status == 404, status)
     status, _ = call(db_path, "GET", "/api/issues/%d" % new_id)
-    check("deleted issue is gone", status == 404, status)
+    check("the issue is still there afterwards", status == 200, status)
+
+    # --- attachments on comments ----------------------------------------
+    # A real 1x1 PNG: the server sniffs these bytes and does not trust what
+    # the client claims the type is.
+    png = base64.b64decode(
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFAAH/q842iQAAAABJRU5ErkJggg=="
+    )
+    status, uploaded = call(
+        db_path, "POST", "/api/issues/%d/attachments" % new_id,
+        body={"filename": "shot.png", "content_type": "image/png",
+              "data": base64.b64encode(png).decode()},
+    )
+    check("uploads an attachment", status == 201, (status, uploaded))
+    attachment = uploaded.get("attachment", {})
+    check("recognises it as an image from its bytes", attachment.get("is_image") is True, attachment)
+    check("does not expose the on-disk name", "stored_name" not in attachment, attachment)
+
+    status, posted = call(
+        db_path, "POST", "/api/issues/%d/comments" % new_id,
+        body={"body": "Screenshot attached.", "attachment_ids": [attachment.get("id")]},
+    )
+    check("a comment can carry an attachment", status == 201, (status, posted))
+    check("the attachment comes back with the comment",
+          [a["filename"] for a in posted.get("comment", {}).get("attachments", [])] == ["shot.png"],
+          posted.get("comment"))
+
+    status, detail = call(db_path, "GET", "/api/issues/%d" % new_id)
+    carried = [a for c in detail["comments"] for a in c.get("attachments", [])]
+    check("the attachment shows on the issue detail", len(carried) == 1, carried)
+
+    # The bytes route, which is not reached through api.handle.
+    ok, payload, headers, ctype = api.read_attachment(
+        db.connect(db_path), attachment.get("id"))
+    check("the file can be read back", ok == 200 and payload == png, len(payload))
+    check("an image is served as an image", ctype == "image/png", ctype)
+    check("and inline",
+          any(h[0] == "Content-Disposition" and h[1].startswith("inline") for h in headers),
+          headers)
+    check("with nosniff",
+          any(h[0] == "X-Content-Type-Options" and h[1] == "nosniff" for h in headers), headers)
+
+    status, _ = call(
+        db_path, "POST", "/api/issues/%d/comments" % new_id,
+        body={"body": "reuse", "attachment_ids": [attachment.get("id")]},
+    )
+    check("an attachment cannot be claimed twice", status == 409, status)
+
+    status, _ = call(db_path, "POST", "/api/issues/%d/attachments" % new_id,
+                     body={"filename": "x.txt", "data": "not base64!!"})
+    check("refuses data that is not base64", status == 422, status)
+
+    status, _ = call(db_path, "POST", "/api/issues/%d/comments" % new_id,
+                     body={"body": "", "attachment_ids": [999999]})
+    check("refuses an attachment id that is not on the issue", status == 404, status)
+
+    status, _ = call(db_path, "POST", "/api/issues/%d/comments" % new_id, body={"body": "  "})
+    check("still rejects a comment with neither text nor file", status == 400, status)
 
     # --- routing --------------------------------------------------------
     status, _ = call(db_path, "GET", "/api/nonsense")

@@ -6,10 +6,18 @@ import {
   relativeTime, formatDate, titleCase, button, select, field, statusLabel,
   assignableNames,
 } from './ui.js';
+import { attachmentList, pendingChip } from './attachments.js';
 
 let descriptionEditing = false;
 let activityOpen = false;
 let lastIssueId = null;
+/* Files chosen for the comment box but not yet sent. They survive a rerender,
+   which matters because a PATCH anywhere in the drawer rebuilds this whole
+   panel -- a screenshot picked a second ago should still be waiting. */
+let pendingFiles = [];
+/* Set between clicking Comment and the rerender that follows, so a second
+   click during an upload cannot post the same remark twice. */
+let submitting = false;
 
 export function render(node, state, actions) {
   const data = state.openIssue;
@@ -24,7 +32,10 @@ export function render(node, state, actions) {
     lastIssueId = issue.id;
     descriptionEditing = false;
     activityOpen = false;
+    // A file picked for one ticket must not follow you to the next one.
+    pendingFiles = [];
   }
+  submitting = false;
 
   clear(node);
   node.setAttribute('aria-label', `${issue.key}: ${issue.title}`);
@@ -159,7 +170,9 @@ function commentsSection(data, actions) {
           el('span', { class: 'comment-author', text: comment.author }),
           el('span', { class: 'comment-time', text: relativeTime(comment.created_at) }),
         ]),
-        el('div', { class: 'comment-text', text: comment.body }),
+        // A comment may be a screenshot with nothing typed above it.
+        comment.body ? el('div', { class: 'comment-text', text: comment.body }) : null,
+        attachmentList(comment.attachments),
       ]),
     ]));
   });
@@ -175,16 +188,62 @@ function commentsSection(data, actions) {
     },
   });
 
+  const tray = el('div', { class: 'attach-tray' });
+
+  /* Hidden from sight but present in the document: a hidden input that is not
+     in the DOM cannot be opened by a click, and the button below is what
+     carries its accessible name. */
+  const picker = el('input', {
+    class: 'visually-hidden',
+    attrs: {
+      type: 'file',
+      multiple: true,
+      id: 'comment-files',
+      tabindex: '-1',
+      'aria-label': 'Attach a screenshot or document to this comment',
+    },
+  });
+  picker.addEventListener('change', () => {
+    for (const file of [...picker.files]) pendingFiles.push(file);
+    picker.value = ''; // clearing it means picking the same file twice still fires
+    renderTray();
+  });
+
+  function renderTray() {
+    clear(tray);
+    pendingFiles.forEach((file, index) => {
+      tray.appendChild(pendingChip(file, () => {
+        pendingFiles.splice(index, 1);
+        renderTray();
+      }));
+    });
+  }
+  renderTray();
+
   function submit() {
     const body = textarea.value.trim();
-    if (!body) return;
-    actions.addComment(issue.id, body);
+    if (submitting || (!body && !pendingFiles.length)) return;
+    submitting = true;
+    // The files are handed over and forgotten here: app.js uploads them, then
+    // posts the comment that carries them, then rerenders either way.
+    const files = pendingFiles.slice();
+    pendingFiles = [];
+    renderTray();
+    actions.addComment(issue.id, body, files);
   }
 
   section.appendChild(el('div', { class: 'composer' }, [
     textarea,
+    tray,
+    picker,
     el('div', { class: 'sprint-actions' }, [
       button('Comment', { variant: 'primary', onClick: submit }),
+      button('Attach file', {
+        variant: 'secondary',
+        icon: 'paperclip',
+        title: 'Screenshot, image or document',
+        onClick: () => picker.click(),
+      }),
       el('span', { class: 'comment-time', text: '⌘↵ to post' }),
     ]),
   ]));
@@ -334,15 +393,10 @@ function sideFields(issue, state, actions) {
       metaRow('Created', formatDate(issue.created_at)),
       metaRow('Resolved', issue.resolved_at ? formatDate(issue.resolved_at) : '—'),
     ]),
-    button('Delete issue', {
-      variant: 'danger',
-      icon: 'trash',
-      onClick: () => {
-        if (window.confirm(`Delete ${issue.key}? This cannot be undone.`)) {
-          actions.deleteIssue(issue.id);
-        }
-      },
-    }),
+    // Deliberately no delete. A ticket is the record of something that was
+    // reported; the activity trail, the comments and the reporter's name are
+    // the value, and all of it goes when the row does. The route is gone too,
+    // so this is not merely a hidden button.
   ];
 
   return nodes;

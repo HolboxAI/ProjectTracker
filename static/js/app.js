@@ -12,6 +12,7 @@ import * as reportsView from './reports.js';
 import * as drawer from './drawer.js';
 import { openCreateIssue, openCreateProject, openUsers, close as closeModal, isOpen as modalOpen } from './modal.js';
 import { el, clear, svgIcon, button, avatar, assignableNames } from './ui.js';
+import { readForUpload } from './attachments.js';
 
 const VIEWS = ['board', 'backlog', 'issues', 'reports'];
 const NAV = [
@@ -227,20 +228,18 @@ const actions = {
     return actions.updateIssue(id, patch);
   },
 
-  async deleteIssue(id) {
+  async addComment(id, body, files = []) {
     try {
-      await api.deleteIssue(id);
-      toast('Issue deleted');
-    } catch (error) {
-      toast(error.message, 'error');
-      return;
-    }
-    navigate({ query: { issue: undefined } });
-  },
-
-  async addComment(id, body) {
-    try {
-      await api.addComment(id, { body });
+      // Files first, then the comment that claims them: a comment and its
+      // screenshots then arrive together, and the one write that matters -- the
+      // comment -- either carries them all or does not happen at all.
+      const attachmentIds = [];
+      for (const file of files) {
+        const payload = await readForUpload(file);
+        const saved = await api.uploadAttachment(id, payload);
+        attachmentIds.push(saved.attachment.id);
+      }
+      await api.addComment(id, { body, attachment_ids: attachmentIds });
     } catch (error) {
       toast(error.message, 'error');
     }

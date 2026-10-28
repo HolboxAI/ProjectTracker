@@ -73,8 +73,9 @@ export const api = {
   createIssue: (payload) => request('POST', '/api/issues', payload),
   issue: (id) => request('GET', `/api/issues/${id}`),
   updateIssue: (id, patch) => request('PATCH', `/api/issues/${id}`, patch),
-  deleteIssue: (id) => request('DELETE', `/api/issues/${id}`),
   addComment: (id, payload) => request('POST', `/api/issues/${id}/comments`, payload),
+  // One file at a time, base64 in the body. See tracker/api.py upload_attachment.
+  uploadAttachment: (id, payload) => request('POST', `/api/issues/${id}/attachments`, payload),
 
   sprints: (key) => request('GET', `/api/projects/${encodeURIComponent(key)}/sprints`),
   createSprint: (key, payload) => request('POST', `/api/projects/${encodeURIComponent(key)}/sprints`, payload),

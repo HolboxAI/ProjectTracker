@@ -70,6 +70,8 @@ export const ICONS = {
   sprinter: '<rect x="2.5" y="3.5" width="11" height="9" rx="1.6"/><path d="M2.5 6.6h11M6 2v3M10 2v3"/>',
   play: '<path d="M5.5 3.6 12 8l-6.5 4.4z"/>',
   check: '<path d="M3.5 8.4 6.4 11.3l6.1-6.4"/>',
+  paperclip: '<path d="M10.6 6.1 6.3 10.4a1.9 1.9 0 0 0 2.7 2.7l4.6-4.6a3.3 3.3 0 0 0-4.7-4.7l-5 5a4.6 4.6 0 0 0 6.5 6.5l4.3-4.3"/>',
+  download: '<path d="M8 2.5v7.6M5.2 7.4 8 10.2l2.8-2.8M3 13.5h10"/>',
 };
 
 export function svgIcon(name, size = 16, className = '') {

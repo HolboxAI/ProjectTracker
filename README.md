@@ -91,8 +91,14 @@ GET    /api/issues?project=&status=&sprint=&assignee=&priority=&type=&q=
 POST   /api/issues
 GET    /api/issues/{id}
 PATCH  /api/issues/{id}          # also takes `index` to place a dragged card
-DELETE /api/issues/{id}
-POST   /api/issues/{id}/comments
+POST   /api/issues/{id}/comments   # body + `attachment_ids`, either may be alone
+POST   /api/issues/{id}/attachments  # one file, base64 in JSON
+GET    /api/attachments/{id}         # metadata
+GET    /api/attachments/{id}/content # the bytes, with their own Content-Type
+
+# There is deliberately no DELETE for an issue: a ticket is the record of
+# something reported, and its comments, attachments and activity trail are the
+# value. Status is how work is retired.
 
 PATCH  /api/sprints/{id}
 POST   /api/sprints/{id}/start

@@ -28,11 +28,12 @@ import argparse
 import getpass
 import json
 import os
+import re
 import sys
 import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-from tracker import api, auth, db
+from tracker import api, auth, db, storage
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 STATIC_DIR = os.path.join(BASE_DIR, "static")
@@ -99,6 +100,18 @@ PUBLIC_STATIC = {
 # leading slash so it matches PUBLIC_STATIC -- without it, /login looked like a
 # path nobody is allowed to see and redirected to itself, forever.
 STATIC_ALIASES = {"/login": "/login.html"}
+
+# The one route that answers with bytes instead of JSON. It is matched here
+# rather than in api.py because a file has to reach the socket with its own
+# Content-Type and Content-Disposition -- that is an HTTP concern, the same way
+# a cookie is.
+ATTACHMENT_CONTENT = re.compile(r"/api/attachments/(?P<attachment_id>\d+)/content")
+
+# A request body is capped before it is read. Attachments arrive as base64
+# inside JSON, so this has to clear storage.MAX_BYTES by a third plus room for
+# the rest of the document. Refusing here means a huge Content-Length never
+# becomes a huge allocation.
+MAX_REQUEST_BYTES = int(storage.MAX_BYTES * 1.4) + (64 * 1024)
 
 LOCAL_PEERS = ("127.0.0.1", "::1")
 COOKIE_MAX_AGE = auth.SESSION_DAYS * 24 * 60 * 60
@@ -237,6 +250,19 @@ class Handler(BaseHTTPRequestHandler):
         self._serve_static(path)
 
     def _handle_api(self, method, path, query):
+        declared = int(self.headers.get("Content-Length") or 0)
+        if declared > MAX_REQUEST_BYTES:
+            # Nothing is read, so the connection cannot be reused: say so and
+            # let it close, or the next request on it starts mid-body.
+            self.close_connection = True
+            self._send_json(
+                413,
+                {"error": "That request is too large. Files are limited to %d MB."
+                          % (storage.MAX_BYTES // (1024 * 1024))},
+                [("Connection", "close")],
+            )
+            return
+
         body = self._read_body()
 
         if method in ("POST", "PATCH", "DELETE") and not self._same_origin():
@@ -254,7 +280,11 @@ class Handler(BaseHTTPRequestHandler):
                 if user is None:
                     self._send_json(401, {"error": "Sign in to continue"})
                     return
-                result = api.handle(method, path, query, body, conn, user, token)
+                content = ATTACHMENT_CONTENT.fullmatch(path) if method == "GET" else None
+                if content:
+                    result = api.read_attachment(conn, int(content.group("attachment_id")))
+                else:
+                    result = api.handle(method, path, query, body, conn, user, token)
         except (api.ApiError, auth.AuthError) as exc:
             self._send_json(exc.status, {"error": exc.message})
             return
@@ -270,12 +300,13 @@ class Handler(BaseHTTPRequestHandler):
         if result is None:
             self._send_json(404, {"error": "No route for %s %s" % (method, path)})
             return
-        if len(result) == 3:
-            status, payload, headers = result
-            self._send_json(status, payload, headers)
-            return
-        status, payload = result
-        self._send_json(status, payload)
+        # Routes return (status, payload), (status, payload, headers) or -- for
+        # an attachment's bytes -- (status, payload, headers, content_type).
+        status = result[0]
+        payload = result[1]
+        headers = result[2] if len(result) > 2 else None
+        content_type = result[3] if len(result) > 3 else "application/json; charset=utf-8"
+        self._send(status, payload, content_type, headers)
 
     def _handle_auth(self, method, path, body, conn, user, token):
         """The four session endpoints. They live here because they are the

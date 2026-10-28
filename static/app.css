@@ -1064,6 +1064,114 @@
   margin-top: var(--space-3);
 }
 
+/* ---- attachments ----
+   A screenshot on a comment is content, so it gets room; a document is a
+   pointer to something, so it stays a chip on one line. Both read their
+   colours from the tokens -- no hex lives here. */
+
+.attachments {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  gap: var(--space-2);
+  margin-top: var(--space-2);
+}
+
+.attachment-image {
+  display: block;
+  max-width: 100%;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--surface-sunken);
+  overflow: hidden;
+  text-decoration: none;
+  transition: border-color var(--dur) var(--ease);
+}
+
+.attachment-image:hover {
+  border-color: var(--border-strong);
+}
+
+.attachment-image img {
+  display: block;
+  max-width: 100%;
+  max-height: 260px;
+  width: auto;
+  height: auto;
+}
+
+.attachment-caption {
+  display: block;
+  padding: var(--space-1) var(--space-2);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--text-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.attachment-file {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  max-width: 100%;
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface-raised);
+  color: var(--text);
+  font-size: var(--text-sm);
+  text-decoration: none;
+  transition: border-color var(--dur) var(--ease);
+}
+
+.attachment-file:hover {
+  border-color: var(--border-strong);
+}
+
+.attach-tray {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+
+.attach-tray:empty {
+  display: none;
+}
+
+.attach-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  max-width: 100%;
+  padding: 2px var(--space-1) 2px var(--space-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface-tint);
+  font-size: var(--text-xs);
+  color: var(--text);
+}
+
+.attach-chip .btn-sm {
+  min-height: 20px;
+  padding: 0 var(--space-1);
+}
+
+.attach-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.attach-size {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+
 .activity-item {
   display: flex;
   gap: var(--space-2);

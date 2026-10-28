@@ -14,6 +14,7 @@ and runs this in one step.
 
 from __future__ import annotations
 
+import base64
 import json
 import os
 import sys
@@ -175,6 +176,7 @@ def main():
         ("/js/issues.js", "javascript", b"COLUMNS"),
         ("/js/reports.js", "javascript", b"barPanel"),
         ("/js/drawer.js", "javascript", b"activitySection"),
+        ("/js/attachments.js", "javascript", b"pendingChip"),
         ("/js/modal.js", "javascript", b"openUsers"),
         ("/js/ui.js", "javascript", b"showDropLine"),
         ("/js/api.js", "javascript", b"sprintAction"),
@@ -247,9 +249,36 @@ def main():
           any(a["field"] == "status" for a in detail.get("activity", [])))
 
     status, _, _ = call("DELETE", "/api/issues/%s" % issue_id)
-    check("DELETE removes the issue", status == 200, status)
+    check("DELETE on an issue is not a route", status == 404, status)
     status, _, _ = call("GET", "/api/issues/%s" % issue_id)
-    check("deleted issue 404s", status == 404, status)
+    check("and the issue survives the attempt", status == 200, status)
+
+    # --- attachments ----------------------------------------------------
+    png = base64.b64decode(
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFAAH/q842iQAAAABJRU5ErkJggg=="
+    )
+    status, _, body = call("POST", "/api/issues/%s/attachments" % issue_id, {
+        "filename": "evidence.png",
+        "content_type": "image/png",
+        "data": base64.b64encode(png).decode(),
+    })
+    uploaded = (json_body(body) or {}).get("attachment", {})
+    check("POST uploads an attachment", status == 201, status)
+    check("the upload reports itself as an image", uploaded.get("is_image") is True, uploaded)
+
+    status, _, body = call("POST", "/api/issues/%s/comments" % issue_id,
+                           {"body": "Here it is.", "attachment_ids": [uploaded.get("id")]})
+    check("POST adds a comment with an attachment", status == 201, status)
+
+    status, headers, body = call("GET", uploaded.get("url", "/api/none"))
+    check("the attachment bytes are served", status == 200, status)
+    check("served with its real image type", "image/png" in headers.get("Content-Type", ""),
+          headers.get("Content-Type"))
+    check("and the browser is told not to second-guess it",
+          headers.get("X-Content-Type-Options") == "nosniff", headers)
+
+    status, _, _ = call("GET", "/api/attachments/999999/content")
+    check("a missing attachment 404s", status == 404, status)
 
     # --- error handling -------------------------------------------------
     status, _, body = call("POST", "/api/issues", {"project": "PHX"})

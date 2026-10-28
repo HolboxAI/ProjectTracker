@@ -12,7 +12,7 @@ import os
 import sqlite3
 from datetime import date, datetime, timedelta, timezone
 
-from . import auth
+from . import auth, storage
 
 # The workflow, in order. The board renders one column per entry.
 STATUSES = ["todo", "in_progress", "in_review", "done"]
@@ -90,10 +90,29 @@ CREATE TABLE IF NOT EXISTS activity (
   created_at TEXT    NOT NULL
 );
 
+-- Attachments belong to a comment. `comment_id` is null between the upload and
+-- the comment that carries it: the client sends the files first, then posts the
+-- comment with their ids, so a comment and its screenshots arrive together in
+-- one write. The bytes themselves are on disk -- `stored_name` is a random name
+-- in the attachments/ directory beside this database, never the client's.
+CREATE TABLE IF NOT EXISTS attachments (
+  id           INTEGER PRIMARY KEY AUTOINCREMENT,
+  issue_id     INTEGER NOT NULL REFERENCES issues(id) ON DELETE CASCADE,
+  comment_id   INTEGER REFERENCES comments(id) ON DELETE CASCADE,
+  uploader     TEXT    NOT NULL,
+  filename     TEXT    NOT NULL,
+  stored_name  TEXT    NOT NULL UNIQUE,
+  content_type TEXT    NOT NULL DEFAULT 'application/octet-stream',
+  byte_size    INTEGER NOT NULL DEFAULT 0,
+  created_at   TEXT    NOT NULL
+);
+
 CREATE INDEX IF NOT EXISTS idx_issues_project ON issues(project_id, status, rank);
 CREATE INDEX IF NOT EXISTS idx_issues_sprint  ON issues(sprint_id);
 CREATE INDEX IF NOT EXISTS idx_comments_issue ON comments(issue_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_activity_issue ON activity(issue_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_attachments_issue   ON attachments(issue_id);
+CREATE INDEX IF NOT EXISTS idx_attachments_comment ON attachments(comment_id);
 """
 
 ISSUE_SELECT = """
@@ -213,6 +232,27 @@ def serialize_comment(row: sqlite3.Row) -> dict:
         "author": row["author"],
         "body": row["body"],
         "created_at": row["created_at"],
+    }
+
+
+def serialize_attachment(row: sqlite3.Row) -> dict:
+    content_type = row["content_type"]
+    return {
+        "id": row["id"],
+        "issue_id": row["issue_id"],
+        "comment_id": row["comment_id"],
+        "filename": row["filename"],
+        "content_type": content_type,
+        "byte_size": row["byte_size"],
+        "uploader": row["uploader"],
+        "created_at": row["created_at"],
+        # Only a verified image is safe to show inline; the client renders an
+        # <img> for these and a download chip for everything else.
+        "is_image": content_type in storage.IMAGE_TYPES,
+        # The bytes have their own route: JSON carries the metadata, not 8 MB
+        # of base64 the browser would have to decode before it could draw.
+        # The stored name on disk is deliberately not exposed.
+        "url": "/api/attachments/%d/content" % row["id"],
     }
 
 

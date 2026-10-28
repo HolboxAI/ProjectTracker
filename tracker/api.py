@@ -7,11 +7,14 @@ this module commits on success, rolls back on failure.
 
 from __future__ import annotations
 
+import base64
+import binascii
 import json
 import re
 import sqlite3
+import urllib.parse
 
-from . import auth, db
+from . import auth, db, storage
 
 # Fallback attribution for callers with no signed-in user -- the CLI and the
 # API tests. A real request always carries one, and `Ctx.actor` then returns
@@ -173,6 +176,61 @@ def _sprint_or_404(ctx, sprint_id):
     if row is None:
         raise ApiError(404, "No sprint with id %s" % sprint_id)
     return row
+
+
+def _attachment_or_404(ctx, attachment_id):
+    row = ctx.conn.execute(
+        "SELECT * FROM attachments WHERE id = ?", (attachment_id,)
+    ).fetchone()
+    if row is None:
+        raise ApiError(404, "No attachment with id %s" % attachment_id)
+    return row
+
+
+def _comment_payload(conn, row):
+    """A comment with the files hanging off it.
+
+    Attachments hang on the comment rather than on the issue: a screenshot is
+    part of the sentence somebody was making, and a bare list of files on the
+    issue would lose which remark each one belongs to.
+    """
+    payload = db.serialize_comment(row)
+    payload["attachments"] = [
+        db.serialize_attachment(a) for a in conn.execute(
+            "SELECT * FROM attachments WHERE comment_id = ? ORDER BY id", (row["id"],))
+    ]
+    return payload
+
+
+def _attachment_ids(ctx, issue_id):
+    """Validate the ids a comment claims, and insist they are unclaimed.
+
+    An id from a different issue is a 404 rather than a 403: it should not
+    confirm that some other issue's attachment exists.
+    """
+    raw = ctx.body.get("attachment_ids")
+    if raw in (None, [], ""):
+        return []
+    if not isinstance(raw, list):
+        raise ApiError(422, "`attachment_ids` must be a list")
+    ids = []
+    for value in raw:
+        try:
+            ids.append(int(value))
+        except (TypeError, ValueError):
+            raise ApiError(422, "`attachment_ids` must be whole numbers")
+    ids = list(dict.fromkeys(ids))
+    if len(ids) > 10:
+        raise ApiError(422, "A comment can carry at most 10 files")
+    for attachment_id in ids:
+        found = ctx.conn.execute(
+            "SELECT issue_id, comment_id FROM attachments WHERE id = ?", (attachment_id,)
+        ).fetchone()
+        if found is None or found["issue_id"] != issue_id:
+            raise ApiError(404, "No attachment %s on this issue" % attachment_id)
+        if found["comment_id"] is not None:
+            raise ApiError(409, "Attachment %s is already on a comment" % attachment_id)
+    return ids
 
 
 def _label_for(value, vocabulary):
@@ -419,7 +477,7 @@ def get_issue(ctx, issue_id):
     ).fetchall()
     return 200, {
         "issue": db.serialize_issue(row),
-        "comments": [db.serialize_comment(c) for c in comments],
+        "comments": [_comment_payload(ctx.conn, c) for c in comments],
         "activity": [db.serialize_activity(a) for a in activity],
     }
 
@@ -532,25 +590,117 @@ def update_issue(ctx, issue_id):
     return 200, {"issue": db.serialize_issue(_issue_or_404(ctx, int(issue_id)))}
 
 
-@route("DELETE", r"/api/issues/(?P<issue_id>\d+)")
-def delete_issue(ctx, issue_id):
-    row = _issue_or_404(ctx, int(issue_id))
-    ctx.conn.execute("DELETE FROM issues WHERE id = ?", (row["id"],))
-    return 200, {"deleted": row["id"]}
-
-
 @route("POST", r"/api/issues/(?P<issue_id>\d+)/comments")
 def add_comment(ctx, issue_id):
     row = _issue_or_404(ctx, int(issue_id))
-    body = str(ctx.require("body")).strip()
+    body = _clean_text(ctx.body.get("body")) or ""
+    attachment_ids = _attachment_ids(ctx, row["id"])
+    # A comment may be nothing but a screenshot: "here is the error" is often
+    # the whole message. Text is required only when there is no file with it.
+    if not body and not attachment_ids:
+        raise ApiError(400, "`body` is required")
+    if len(body) > 20000:
+        raise ApiError(422, "A comment must be 20,000 characters or fewer")
+
     cur = ctx.conn.execute(
         "INSERT INTO comments (issue_id, author, body, created_at) VALUES (?, ?, ?, ?)",
         (row["id"], _clean_text(ctx.body.get("author")) or ctx.actor, body, db.utcnow()),
     )
+    comment_id = cur.lastrowid
+    for attachment_id in attachment_ids:
+        ctx.conn.execute(
+            "UPDATE attachments SET comment_id = ? WHERE id = ?", (comment_id, attachment_id)
+        )
     ctx.conn.execute("UPDATE issues SET updated_at = ? WHERE id = ?", (db.utcnow(), row["id"]))
     db.log_activity(ctx.conn, row["id"], ctx.actor, "comment", None, None)
-    comment = ctx.conn.execute("SELECT * FROM comments WHERE id = ?", (cur.lastrowid,)).fetchone()
-    return 201, {"comment": db.serialize_comment(comment)}
+    comment = ctx.conn.execute("SELECT * FROM comments WHERE id = ?", (comment_id,)).fetchone()
+    return 201, {"comment": _comment_payload(ctx.conn, comment)}
+
+
+@route("POST", r"/api/issues/(?P<issue_id>\d+)/attachments")
+def upload_attachment(ctx, issue_id):
+    """Take one file, as base64 inside JSON.
+
+    Not multipart/form-data: this server is the standard library only, and
+    hand-writing a multipart parser to save a third of the bytes on a
+    screenshot is the worse trade. `server.py` caps the request size before
+    any of this runs.
+    """
+    row = _issue_or_404(ctx, int(issue_id))
+    filename = storage.clean_filename(ctx.require("filename"))
+    encoded = re.sub(r"\s+", "", str(ctx.body.get("data") or ""))
+    if not encoded:
+        raise ApiError(400, "`data` is required")
+    try:
+        payload = base64.b64decode(encoded, validate=True)
+    except (binascii.Error, ValueError):
+        raise ApiError(422, "`data` must be base64")
+    if not payload:
+        raise ApiError(422, "That file is empty")
+    if len(payload) > storage.MAX_BYTES:
+        raise ApiError(413, "Files are limited to %d MB" % (storage.MAX_BYTES // (1024 * 1024)))
+
+    # The bytes decide whether this is an image, not the client's claim -- see
+    # storage.sniff_image. The declared type is kept for files that are not
+    # images, only if it looks like a real media type.
+    image_type = storage.sniff_image(payload)
+    declared = str(ctx.body.get("content_type") or "").strip()
+    if image_type:
+        content_type = image_type
+    elif re.fullmatch(r"[A-Za-z0-9.+-]+/[A-Za-z0-9.+-]+", declared):
+        content_type = declared.lower()
+    else:
+        content_type = "application/octet-stream"
+
+    stored_name = storage.store(ctx.conn, payload)
+    try:
+        cur = ctx.conn.execute(
+            "INSERT INTO attachments (issue_id, comment_id, uploader, filename, stored_name, "
+            "content_type, byte_size, created_at) VALUES (?, NULL, ?, ?, ?, ?, ?, ?)",
+            (row["id"], ctx.actor, filename, stored_name, content_type, len(payload),
+             db.utcnow()),
+        )
+        ctx.conn.execute("UPDATE issues SET updated_at = ? WHERE id = ?",
+                         (db.utcnow(), row["id"]))
+    except Exception:
+        # The row is rolled back by handle(); the file it pointed at would
+        # otherwise be left behind with nothing referencing it.
+        storage.remove(ctx.conn, stored_name)
+        raise
+    saved = _attachment_or_404(ctx, cur.lastrowid)
+    return 201, {"attachment": db.serialize_attachment(saved)}
+
+
+@route("GET", r"/api/attachments/(?P<attachment_id>\d+)")
+def get_attachment(ctx, attachment_id):
+    return 200, {"attachment": db.serialize_attachment(_attachment_or_404(ctx, int(attachment_id)))}
+
+
+def read_attachment(conn, attachment_id):
+    """The bytes of one attachment -- the only route here that is not JSON.
+
+    Called straight from `server.py` rather than reached through `handle`,
+    because a file has to leave as bytes with its own Content-Type. The return
+    is the same shape the HTTP layer already understands, with a fourth slot
+    carrying the type to send instead of application/json.
+    """
+    ctx = Ctx(conn, {}, {})
+    row = _attachment_or_404(ctx, int(attachment_id))
+    try:
+        payload = storage.read(conn, row["stored_name"])
+    except OSError:
+        raise ApiError(404, "That file is missing from the server")
+
+    content_type, inline = storage.serving(row["content_type"])
+    # nosniff is what stops a browser from deciding an uploaded file is HTML
+    # because it looks like HTML -- the header is the lock, the magic-number
+    # check above is the bolt.
+    headers = [("X-Content-Type-Options", "nosniff")]
+    quoted = urllib.parse.quote(row["filename"])
+    disposition = "inline" if inline else "attachment"
+    headers.append(("Content-Disposition",
+                    "%s; filename*=UTF-8''%s" % (disposition, quoted)))
+    return 200, payload, headers, content_type
 
 
 # --------------------------------------------------------------------------

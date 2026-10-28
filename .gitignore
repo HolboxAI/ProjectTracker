@@ -28,5 +28,8 @@ venv/
 *.pem
 *.key
 
-# Deployment leftovers
+# Uploaded attachment bytes. They live beside whichever database is in use, so
+# a local run against tracker.sqlite3 puts them in ./attachments -- somebody's
+# screenshot, which does not belong in history any more than the database does.
+attachments/
 /tmp/covex-tracker*.tgz
